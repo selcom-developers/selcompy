@@ -17,7 +17,9 @@ _VENDOR = os.environ.get("SELCOM_SANDBOX_VENDOR")
 
 @pytest.mark.skipif(not (_KEY and _SECRET and _VENDOR), reason="sandbox credentials not set")
 def test_order_status_for_unknown_order_answers() -> None:
-    assert _KEY and _SECRET and _VENDOR
+    assert _KEY
+    assert _SECRET
+    assert _VENDOR
     config = Config(
         environment=Environment.SANDBOX,
         credentials=Credentials(api_key=_KEY, api_secret=_SECRET, vendor=_VENDOR),
