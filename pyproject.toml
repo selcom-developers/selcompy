@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "selcom-client"
+name = "selcompy"
 dynamic = ["version"]
 description = "Typed sync and async Python client for the Selcom API gateway (community project, not affiliated with Selcom Paytech Ltd)."
 readme = "README.md"
@@ -28,9 +28,9 @@ classifiers = [
 dependencies = ["httpx>=0.27,<1"]
 
 [project.urls]
-Homepage = "https://github.com/selcom-developers/py-selcom"
+Homepage = "https://github.com/selcom-developers/selcompy"
 Specification = "https://github.com/selcom-developers/selcom-spec"
-Changelog = "https://github.com/selcom-developers/py-selcom/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/selcom-developers/selcompy/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
@@ -42,10 +42,10 @@ dev = [
 ]
 
 [tool.hatch.version]
-path = "src/selcom_client/_version.py"
+path = "src/selcompy/_version.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/selcom_client"]
+packages = ["src/selcompy"]
 
 [tool.hatch.build.targets.sdist]
 include = ["/src", "/tests", "/scripts", "/README.md", "/LICENSE", "/CHANGELOG.md", "/SPEC_VERSION"]
