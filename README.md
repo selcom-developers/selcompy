@@ -168,6 +168,7 @@ from selcompy import Verdict, WebhookVerifier, parse_webhook, ReplayStoreError
 
 verifier = WebhookVerifier(api_secret)  # window_seconds=300, in-memory replay store
 
+
 def handle(headers: dict[str, str], raw_body: bytes) -> int:
     try:
         verdict = verifier.verify(headers, raw_body)  # use the raw body, before any parsing
