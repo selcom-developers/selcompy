@@ -2,6 +2,8 @@
 
 Typed Python client for the Selcom API gateway, with a synchronous `Client` and an asynchronous `AsyncClient` over [httpx](https://www.python-httpx.org/). Apache-2.0.
 
+Documentation: <https://selcom-developers.github.io/>
+
 > **Not affiliated with Selcom Paytech Ltd.** For API access, credentials, contracts and support, go to Selcom: <https://developers.selcommobile.com/>.
 
 ## Install
@@ -165,7 +167,6 @@ A webhook is a hint, not proof. Confirm with `order_status` before you fulfil an
 from selcompy import Verdict, WebhookVerifier, parse_webhook, ReplayStoreError
 
 verifier = WebhookVerifier(api_secret)  # window_seconds=300, in-memory replay store
-
 
 def handle(headers: dict[str, str], raw_body: bytes) -> int:
     try:
