@@ -3,7 +3,8 @@
     python scripts/refresh_vectors.py           # replace the copy with the files at SPEC_VERSION
     python scripts/refresh_vectors.py --check   # fail if the copy differs, byte for byte
 
-The tag to use is the first line of ``SPEC_VERSION`` at the repository root.
+``SPEC_VERSION`` at the repository root holds the tag on its first line and the commit the tag
+points to on its second line. The commit is checked too.
 """
 
 from __future__ import annotations
@@ -38,14 +39,37 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="only compare, never write")
     args = parser.parse_args()
 
-    tag = (ROOT / "SPEC_VERSION").read_text(encoding="utf-8").splitlines()[0].strip()
+    lines = (ROOT / "SPEC_VERSION").read_text(encoding="utf-8").splitlines()
+    tag = lines[0].strip()
+    commit = lines[1].strip() if len(lines) > 1 else ""
     copy = ROOT / "tests" / "vectors"
     with tempfile.TemporaryDirectory() as tmp:
         checkout = Path(tmp) / "spec"
         subprocess.run(
-            ["git", "clone", "--quiet", "--depth", "1", "--branch", tag, SPEC_URL, str(checkout)],
+            [
+                "git",
+                "-c",
+                "advice.detachedHead=false",
+                "clone",
+                "--quiet",
+                "--depth",
+                "1",
+                "--branch",
+                tag,
+                SPEC_URL,
+                str(checkout),
+            ],
             check=True,
         )
+        head = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if commit and head != commit:
+            print(f"selcom-spec {tag} is {head}, SPEC_VERSION says {commit}", file=sys.stderr)
+            return 1
         source = checkout / "vectors"
         if args.check:
             problems = _differences(copy, source) if copy.is_dir() else ["copy is missing"]
