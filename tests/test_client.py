@@ -275,9 +275,8 @@ def test_signing_failure_sends_nothing() -> None:
     transport, seen = recorder()
     plan = order_status("ORD-1")
     bad = Plan(plan.spec, {"bad,key": "x"}, plan.parse)
-    with Client(CONFIG, transport=transport) as client:
-        with pytest.raises(SigningError):
-            client._execute(bad)  # noqa: SLF001
+    with Client(CONFIG, transport=transport) as client, pytest.raises(SigningError):
+        client._execute(bad)
     assert seen == []
 
 
