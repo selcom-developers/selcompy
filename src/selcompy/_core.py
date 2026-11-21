@@ -52,17 +52,28 @@ def check_payment_client(client: httpx.Client | httpx.AsyncClient) -> None:
     This reads the pool settings of httpx's own transports (a private detail of httpx and
     httpcore); transports without such a pool, such as test fakes, are not inspected.
     """
+    missing = object()
     transports = [client._transport, *client._mounts.values()]
     for transport in transports:
-        pool = getattr(transport, "_pool", None)
-        if pool is None:
-            continue
-        if getattr(pool, "_http2", False):
+        pool = getattr(transport, "_pool", missing)
+        if pool is missing and not isinstance(
+            transport, (httpx.HTTPTransport, httpx.AsyncHTTPTransport)
+        ):
+            continue  # a fake or custom transport without an httpx pool: not inspected
+        http2 = getattr(pool, "_http2", missing)
+        keepalive = getattr(pool, "_max_keepalive_connections", missing)
+        if missing in (http2, keepalive):
+            # Fail closed: a pool whose settings cannot be read cannot be vouched for.
+            raise ConfigError(
+                "payment_http_client has a connection pool whose keep-alive and HTTP/2 settings "
+                "cannot be read; this version of httpx is not supported for injected clients"
+            )
+        if http2:
             raise ConfigError(
                 "payment_http_client must not enable HTTP/2: it multiplexes requests on one "
                 "connection (build it with http2=False)"
             )
-        if getattr(pool, "_max_keepalive_connections", 0):
+        if keepalive:
             raise ConfigError(
                 "payment_http_client must not keep connections for reuse "
                 "(build it with limits=PAYMENT_LIMITS)"

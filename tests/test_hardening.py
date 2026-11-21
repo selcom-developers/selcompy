@@ -430,6 +430,22 @@ async def test_async_store_must_answer_with_a_bool_too() -> None:
         await v.averify(*delivery())
 
 
+@pytest.mark.parametrize("attribute", ["_http2", "_max_keepalive_connections", "_pool"])
+def test_unreadable_pool_settings_fail_closed(attribute: str) -> None:
+    client = httpx.Client(limits=PAYMENT_LIMITS)
+    target = client._transport if attribute == "_pool" else client._transport._pool  # type: ignore[attr-defined]
+    delattr(target, attribute)  # as if httpcore had renamed it
+    with pytest.raises(ConfigError, match="cannot be read"):
+        Client(CONFIG, http_client=httpx.Client(), payment_http_client=client)
+
+
+async def test_async_unreadable_pool_settings_fail_closed() -> None:
+    client = httpx.AsyncClient(limits=PAYMENT_LIMITS)
+    del client._transport._pool._http2  # type: ignore[attr-defined]
+    with pytest.raises(ConfigError, match="cannot be read"):
+        AsyncClient(CONFIG, http_client=httpx.AsyncClient(), payment_http_client=client)
+
+
 # 2b. The transport= path and payment clients with pooling or HTTP/2 -------------------------
 
 
