@@ -174,7 +174,9 @@ class WebhookVerifier:
             raise ConfigError("window_seconds must be positive")
         self._signer = HS256Signer(secret)
         self._window = timedelta(seconds=window_seconds)
-        self.replay_store: ReplayStore = replay_store or InMemoryReplayStore()
+        self.replay_store: ReplayStore = (
+            InMemoryReplayStore() if replay_store is None else replay_store
+        )
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def __repr__(self) -> str:
