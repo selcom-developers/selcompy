@@ -2,11 +2,7 @@
 
 Typed Python client for the Selcom API gateway, with a synchronous `Client` and an asynchronous `AsyncClient` over [httpx](https://www.python-httpx.org/). Apache-2.0.
 
-> **Not affiliated with Selcom Paytech Ltd.** This is a community project. "Selcom" names the API it talks to. For API access, credentials, contracts and support, go to Selcom: <https://developers.selcommobile.com/>. Where this client and Selcom's portal disagree about the API itself, the portal wins.
-
-It is written from the shared specification in [selcom-spec](https://github.com/selcom-developers/selcom-spec) and tested against that specification's vectors, so it signs requests and reads results the same way as the other community clients.
-
-Every layer is usable on its own and replaceable: the signer, the transport, the operations, the results and the webhook verifier.
+> **Not affiliated with Selcom Paytech Ltd.** For API access, credentials, contracts and support, go to Selcom: <https://developers.selcommobile.com/>.
 
 ## Install
 
@@ -95,8 +91,6 @@ A missing key, secret or vendor fails when the configuration is built, not on th
 
 Requests are typed, frozen dataclasses. The vendor ID and the float PIN come from the configuration. Amounts are whole units: an `int` or a whole `Decimal`, never a float, and a fractional amount is rejected before signing. Checkout orders always carry an explicit `currency`. Webhook, redirect and cancel URLs are given as plain URLs; the client base64-encodes them as the API requires.
 
-Submitting and querying are separate methods. Nothing hides a query inside a submit.
-
 ## Results and errors
 
 Every operation returns a `Result` with:
@@ -132,7 +126,7 @@ The client never retries, not even a connect failure on a payment or a write. `t
 5. Submit the same ID again only after a status query returns `NOT_FOUND`, or after `NOT_SENT`.
 6. Apply results through one function keyed on the ID, under a row lock or a compare-and-set, so that a webhook and a poll arriving together cannot both win.
 
-Payments and writes (create, cancel, delete) never reuse a connection. By default the client owns a separate pool for them, built with `max_keepalive_connections=0` and without HTTP/2, so each one opens a new connection and closes it after the response. (The `Connection: close` header is sent too, but it only takes effect after the response and HTTP/2 drops it, so it is not what provides this.)
+Payments and writes (create, cancel, delete) never reuse a connection. By default the client owns a separate pool for them, built with `max_keepalive_connections=0` and without HTTP/2, so each one opens a new connection and closes it after the response.
 
 ## Replacing the transport
 
@@ -189,7 +183,7 @@ def handle(headers: dict[str, str], raw_body: bytes) -> int:
 
 Handler order: verify, store, acknowledge, then confirm with `order_status` in the background. Return a 5xx only when storing fails.
 
-`verify` follows the specification step by step. It never raises on bad input: every malformed delivery is `INVALID`, and numbers in signed fields are checked from their text without being expanded. The one exception is `ReplayStoreError`, raised when the replay store itself fails. `UNSIGNED` deliveries have nothing to check, so the order-status confirmation is the only protection.
+`verify` never raises on bad input: every malformed delivery is `INVALID`, and numbers in signed fields are checked from their text without being expanded. The one exception is `ReplayStoreError`, raised when the replay store itself fails. `UNSIGNED` deliveries have nothing to check, so the order-status confirmation is the only protection.
 
 In an async handler use `await verifier.averify(headers, raw_body)`. It accepts an `async_replay_store` (the `AsyncReplayStore` protocol, for a shared store; an async store passed as `replay_store` is refused) and falls back to the synchronous store otherwise. The verifier's clock must return a timezone-aware `datetime`; a naive one raises `ConfigError`. Bodies over 1 MiB (counted in UTF-8 bytes) are `INVALID`.
 
