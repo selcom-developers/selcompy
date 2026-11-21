@@ -3,6 +3,7 @@
 Not affiliated with Selcom Paytech Ltd.
 """
 
+from ._core import PAYMENT_LIMITS
 from ._version import __version__
 from .async_client import AsyncClient
 from .client import Client
@@ -44,6 +45,7 @@ from .redaction import redact, redact_body, redact_headers, redact_query
 from .results import OperationKind, Result, Status, parse_amount
 from .signing import HS256Signer, SignedRequest, Signer, sign_request
 from .webhooks import (
+    AsyncReplayStore,
     InMemoryReplayStore,
     ReplayStore,
     Verdict,
@@ -53,10 +55,12 @@ from .webhooks import (
 )
 
 __all__ = [
+    "PAYMENT_LIMITS",
     "PAYMENT_TIMEOUTS",
     "QUERY_TIMEOUTS",
     "Address",
     "AsyncClient",
+    "AsyncReplayStore",
     "Balance",
     "CardPaymentRequest",
     "Client",

@@ -29,6 +29,7 @@ from .models import (
     _day,
     _text,
 )
+from .redaction import redact
 from .results import OperationKind, payment_status_to_status, try_parse_amount
 
 Entries = list[dict[str, Any]]
@@ -108,7 +109,7 @@ ALL_OPERATIONS: Final = (
 )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class Plan:
     """One operation, ready to run: the spec, the caller's parameters and the response parser.
 
@@ -121,6 +122,13 @@ class Plan:
     parse: Callable[[Entries], Any]
     transid: str | None = None
     order_id: str | None = None
+
+    def __repr__(self) -> str:
+        shown = redact(self.params, self.spec.path)
+        return (
+            f"Plan(operation={self.spec.name!r}, params={shown!r}, "
+            f"transid={self.transid!r}, order_id={self.order_id!r})"
+        )
 
 
 def _none(_: Entries) -> None:

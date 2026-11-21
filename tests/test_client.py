@@ -246,20 +246,29 @@ async def test_async_request_matches_sync_request() -> None:
     assert a.headers["Digest"] == b.headers["Digest"]
 
 
-def test_injected_http_client_is_used_and_not_closed() -> None:
+def test_injected_http_clients_are_used_and_not_closed() -> None:
     transport, seen = recorder()
     http = httpx.Client(transport=transport)
-    with Client(CONFIG, http_client=http) as client:
+    pay = httpx.Client(transport=transport)
+    with Client(CONFIG, http_client=http, payment_http_client=pay) as client:
         client.order_status("ORD-1")
-    assert len(seen) == 1
+        client.utility_payment(UTILITY)
+    assert len(seen) == 2
     assert not http.is_closed
+    assert not pay.is_closed
     http.close()
+    pay.close()
 
 
 def test_http_client_and_transport_together_are_refused() -> None:
     transport, _ = recorder()
     with pytest.raises(ConfigError):
-        Client(CONFIG, http_client=httpx.Client(), transport=transport)
+        Client(
+            CONFIG,
+            http_client=httpx.Client(),
+            payment_http_client=httpx.Client(),
+            transport=transport,
+        )
 
 
 def test_owned_client_is_closed() -> None:

@@ -1,7 +1,9 @@
 """Exceptions raised by the client.
 
 No exception carries a raw request: no URL with a query string, no headers, no body. Where an
-underlying library error is relevant, only its type name is kept.
+underlying library error is relevant, only its type name is kept. Transport errors are raised
+outside the handler of the library error, so neither ``__cause__`` nor ``__context__`` holds it
+(the library error references the request, with its signing headers and body).
 """
 
 from __future__ import annotations

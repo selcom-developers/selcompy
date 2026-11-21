@@ -44,6 +44,13 @@ class Verdict(enum.Enum):
 
 
 @runtime_checkable
+class AsyncReplayStore(Protocol):
+    """The asynchronous form of :class:`ReplayStore`, for a shared store such as a cache server."""
+
+    async def check_and_record(self, key: str, expires_at: datetime, now: datetime) -> bool: ...
+
+
+@runtime_checkable
 class ReplayStore(Protocol):
     """Remembers digests for the length of the window.
 
@@ -145,6 +152,17 @@ def _lookup(body: Mapping[str, Any], field_name: str) -> tuple[bool, object]:
     return True, node
 
 
+def _body_text(raw_body: bytes | str) -> str | None:
+    """The body as text, or ``None`` when it is over the cap. The cap counts UTF-8 bytes."""
+    if len(raw_body) > MAX_BODY_BYTES:  # characters never take fewer bytes than their count
+        return None
+    if isinstance(raw_body, bytes):
+        return raw_body.decode("utf-8")
+    if len(raw_body.encode("utf-8")) > MAX_BODY_BYTES:
+        return None
+    return raw_body
+
+
 def _header(headers: Mapping[str, str], name: str) -> str | None:
     wanted = name.lower()
     for key, value in headers.items():
@@ -166,6 +184,7 @@ class WebhookVerifier:
         *,
         window_seconds: int = 300,
         replay_store: ReplayStore | None = None,
+        async_replay_store: AsyncReplayStore | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if not secret:
@@ -177,28 +196,69 @@ class WebhookVerifier:
         self.replay_store: ReplayStore = (
             InMemoryReplayStore() if replay_store is None else replay_store
         )
+        self.async_replay_store = async_replay_store
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def __repr__(self) -> str:
         return f"WebhookVerifier(window_seconds={int(self._window.total_seconds())})"
 
+    def _now(self) -> datetime:
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ConfigError("the webhook clock must return a timezone-aware datetime")
+        return now
+
     def verify(self, headers: Mapping[str, str], raw_body: bytes | str) -> Verdict:
         """The verdict for one delivery.
 
-        Never raises, whatever the input, except :class:`ReplayStoreError` when the replay store
-        fails (answer with a 5xx).
+        Never raises on bad input: every malformed delivery is ``INVALID``. The exceptions are
+        :class:`ReplayStoreError` when the replay store fails (answer with a 5xx) and
+        :class:`ConfigError` when the clock is not timezone-aware (a setup mistake).
         """
-        try:
-            checked = self._check(headers, raw_body)
-        except Exception:
-            return Verdict.INVALID
+        now = self._now()
+        checked = self._safe_check(headers, raw_body, now)
         if not isinstance(checked, tuple):
             return checked
         digest, timestamp = checked
-        return self._replay(digest, timestamp)
+        expires_at = max(now, timestamp) + self._window
+        try:
+            seen = self.replay_store.check_and_record(digest, expires_at, now)
+        except ReplayStoreError:
+            raise
+        except Exception:
+            raise ReplayStoreError("the replay store failed") from None
+        return Verdict.REPLAY if seen else Verdict.VALID
+
+    async def averify(self, headers: Mapping[str, str], raw_body: bytes | str) -> Verdict:
+        """Like :meth:`verify`, for async handlers. Uses ``async_replay_store`` when one was
+        given, and the synchronous ``replay_store`` otherwise."""
+        now = self._now()
+        checked = self._safe_check(headers, raw_body, now)
+        if not isinstance(checked, tuple):
+            return checked
+        digest, timestamp = checked
+        expires_at = max(now, timestamp) + self._window
+        try:
+            if self.async_replay_store is not None:
+                seen = await self.async_replay_store.check_and_record(digest, expires_at, now)
+            else:
+                seen = self.replay_store.check_and_record(digest, expires_at, now)
+        except ReplayStoreError:
+            raise
+        except Exception:
+            raise ReplayStoreError("the replay store failed") from None
+        return Verdict.REPLAY if seen else Verdict.VALID
+
+    def _safe_check(
+        self, headers: Mapping[str, str], raw_body: bytes | str, now: datetime
+    ) -> Verdict | tuple[str, datetime]:
+        try:
+            return self._check(headers, raw_body, now)
+        except Exception:
+            return Verdict.INVALID
 
     def _check(
-        self, headers: Mapping[str, str], raw_body: bytes | str
+        self, headers: Mapping[str, str], raw_body: bytes | str, now: datetime
     ) -> Verdict | tuple[str, datetime]:
         digest = _header(headers, "Digest")
         if digest is None:
@@ -211,14 +271,9 @@ class WebhookVerifier:
             timestamp = parse_timestamp(timestamp_text)
         except SigningError:
             return Verdict.INVALID
-        if isinstance(raw_body, bytes):
-            if len(raw_body) > MAX_BODY_BYTES:
-                return Verdict.INVALID
-            text = raw_body.decode("utf-8")
-        else:
-            if len(raw_body) > MAX_BODY_BYTES:
-                return Verdict.INVALID
-            text = raw_body
+        text = _body_text(raw_body)
+        if text is None:
+            return Verdict.INVALID
         body = _loads(text)
         if not isinstance(body, dict) or not fields_header:
             return Verdict.INVALID
@@ -237,21 +292,9 @@ class WebhookVerifier:
         expected = self._signer.sign(signing_string(timestamp_text, flat))
         if not hmac.compare_digest(expected.encode("utf-8"), digest.encode("utf-8")):
             return Verdict.INVALID
-        now = self._clock()
         if abs(now - timestamp) > self._window:
             return Verdict.STALE
         return digest, timestamp
-
-    def _replay(self, digest: str, timestamp: datetime) -> Verdict:
-        now = self._clock()
-        expires_at = max(now, timestamp) + self._window
-        try:
-            seen = self.replay_store.check_and_record(digest, expires_at, now)
-        except ReplayStoreError:
-            raise
-        except Exception:
-            raise ReplayStoreError("the replay store failed") from None
-        return Verdict.REPLAY if seen else Verdict.VALID
 
 
 @dataclass(frozen=True, repr=False)
@@ -309,9 +352,9 @@ def parse_webhook(raw_body: bytes | str) -> WebhookPayload | None:
     """Parse a delivery's body. Never raises: returns ``None`` when the body is not a JSON
     object, and ``None`` fields (or ``amount_tzs=None``) for anything it cannot read."""
     try:
-        if len(raw_body) > MAX_BODY_BYTES:
+        text = _body_text(raw_body)
+        if text is None:
             return None
-        text = raw_body.decode("utf-8") if isinstance(raw_body, bytes) else raw_body
         body = _loads(text)
         if not isinstance(body, dict):
             return None

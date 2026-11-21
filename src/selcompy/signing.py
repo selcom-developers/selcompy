@@ -18,7 +18,7 @@ from typing import Any, Final, Protocol, runtime_checkable
 from urllib.parse import quote
 
 from .errors import SigningError
-from .masking import HIDDEN
+from .masking import HIDDEN, NoSecretCopy
 
 MAX_SAFE_INTEGER: Final = 2**53 - 1
 MAX_DEPTH: Final = 8
@@ -47,7 +47,7 @@ class Signer(Protocol):
         ...
 
 
-class HS256Signer:
+class HS256Signer(NoSecretCopy):
     """HMAC-SHA256 keyed with the API secret."""
 
     __slots__ = ("_secret",)
@@ -135,17 +135,18 @@ def normalise_value(key: str, value: object) -> Scalar:
     if isinstance(value, bool):
         return value
     if isinstance(value, int):
-        if abs(value) > MAX_SAFE_INTEGER:
+        number = int(value)  # a plain int, also for IntEnum and other subclasses
+        if abs(number) > MAX_SAFE_INTEGER:
             raise SigningError(
                 "NUMBER_OUT_OF_RANGE", f"{key}: send integers above 2^53-1 as strings"
             )
-        return value
+        return number
     if isinstance(value, float):
         if not math.isfinite(value) or not value.is_integer():
             raise SigningError("NON_INTEGER_NUMBER", f"{key}: the number has a fractional part")
         return normalise_value(key, int(value))
     if isinstance(value, str):
-        return value
+        return str.__str__(value)  # plain text, also for str-based Enums and other subclasses
     raise SigningError("UNSUPPORTED_TYPE", f"{key}: {type(value).__name__} cannot be signed")
 
 
@@ -169,7 +170,7 @@ def flatten(params: Mapping[str, Any]) -> FlatPairs:
         for raw_key, value in node.items():
             if not isinstance(raw_key, str) or raw_key == "":
                 raise SigningError("INVALID_KEY", "empty or non-string key")
-            key = f"{prefix}.{raw_key}" if prefix else raw_key
+            key = f"{prefix}.{str.__str__(raw_key)}" if prefix else str.__str__(raw_key)
             if _KEY.fullmatch(key) is None:
                 raise SigningError("INVALID_KEY", f"{key!r} has characters outside [A-Za-z0-9_.-]")
             if isinstance(value, Mapping):

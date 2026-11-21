@@ -132,24 +132,34 @@ The client never retries, not even a connect failure on a payment or a write. `t
 5. Submit the same ID again only after a status query returns `NOT_FOUND`, or after `NOT_SENT`.
 6. Apply results through one function keyed on the ID, under a row lock or a compare-and-set, so that a webhook and a poll arriving together cannot both win.
 
-Payments and writes (create, cancel, delete) send `Connection: close`, so they use a fresh connection rather than a kept-alive one.
+Payments and writes (create, cancel, delete) never reuse a connection. By default the client owns a separate pool for them, built with `max_keepalive_connections=0` and without HTTP/2, so each one opens a new connection and closes it after the response. (The `Connection: close` header is sent too, but it only takes effect after the response and HTTP/2 drops it, so it is not what provides this.)
 
 ## Replacing the transport
 
-The HTTP layer is yours to replace. Pass a ready `httpx.Client` or `httpx.AsyncClient` (proxy, logging, event hooks, custom CA bundle), or only a transport (a fake in tests):
+The HTTP layer is yours to replace. Pass a transport (a fake in tests), or your own ready clients (proxy, logging, event hooks, custom CA bundle):
 
 ```python
 import httpx
-from selcompy import Client
+from selcompy import PAYMENT_LIMITS, Client
 
-http = httpx.Client(proxy="http://proxy.internal:3128", verify="/etc/ssl/ca.pem")
-client = Client(config, http_client=http)  # you close `http`
-
+# A fake transport for tests
 fake = httpx.MockTransport(lambda request: httpx.Response(200, json={"resultcode": "000"}))
 client = Client(config, transport=fake)
+
+# Your own clients: one for queries, and a dedicated one for payments and writes
+queries = httpx.Client(proxy="http://proxy.internal:3128", verify="/etc/ssl/ca.pem")
+payments = httpx.Client(
+    proxy="http://proxy.internal:3128",
+    verify="/etc/ssl/ca.pem",
+    limits=PAYMENT_LIMITS,   # keep no connection for reuse
+    http2=False,             # HTTP/2 multiplexes requests on one connection
+)
+client = Client(config, http_client=queries, payment_http_client=payments)  # you close both
 ```
 
-The default transport is built with `retries=0` and redirects are never followed. If you inject a client or transport that retries on its own, do not use it for payments or writes.
+When you pass `http_client` you must also pass a separate `payment_http_client`, built as above, so that a payment or write never travels on a connection an earlier request used. The same client twice is refused. Injected clients must not set default `params` or `auth`, because those would change the signed request; that is refused too.
+
+The default transports are built with `retries=0` and redirects are never followed. If you inject something that retries on its own, do not use it for payments or writes.
 
 The clock and the signer are replaceable too: `Client(config, clock=..., signer_factory=...)`. The signer in `selcompy.signing` is a pure function (`sign_request`) with no I/O and no clock.
 
@@ -181,6 +191,8 @@ Handler order: verify, store, acknowledge, then confirm with `order_status` in t
 
 `verify` follows the specification step by step. It never raises on bad input: every malformed delivery is `INVALID`, and numbers in signed fields are checked from their text without being expanded. The one exception is `ReplayStoreError`, raised when the replay store itself fails. `UNSIGNED` deliveries have nothing to check, so the order-status confirmation is the only protection.
 
+In an async handler use `await verifier.averify(headers, raw_body)`. It accepts an `async_replay_store` (the `AsyncReplayStore` protocol, for a shared store) and falls back to the synchronous store otherwise. The verifier's clock must return a timezone-aware `datetime`; a naive one raises `ConfigError`. Bodies over 1 MiB (counted in UTF-8 bytes) are `INVALID`.
+
 A replay entry lives until the later of the current time and the signed timestamp, plus the window. `InMemoryReplayStore` is for one process; implement the `ReplayStore` protocol (one atomic method) on a shared store when you run several.
 
 `parse_webhook` never raises. Fields it cannot read come back as `None`, and `amount_tzs` is `None` ("unparsed") when the amount text is not a whole-unit amount. `VALID` covers only the fields named in `Signed-Fields`, and the amount is not one of them.
@@ -189,7 +201,7 @@ A replay entry lives until the later of the current time and the signed timestam
 
 - Secrets: the API secret, the PIN, `Authorization` and `Digest` never appear in `repr`, exception messages or the library's own output. The API key shows its last 4 characters.
 - Redaction: `redact`, `redact_headers`, `redact_query` and `redact_body` mask secrets, phone numbers (last 4 characters kept), e-mail addresses and names, and treat `utilityref` as a phone number on `/v1/walletcashin/` paths. Use them for anything you store or log.
-- Exceptions carry no request: no URL, headers or body.
+- Exceptions carry no request: no URL, headers or body, and no chained exception that references one. Credentials, configuration and signers refuse to be pickled.
 - Keep credentials out of source control and load them from the environment or a secret store.
 - Keep the host clock synchronised: the gateway rejects requests whose time is too far from its own.
 

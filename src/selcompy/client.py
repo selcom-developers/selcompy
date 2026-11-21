@@ -9,9 +9,9 @@ from typing import Any
 import httpx
 
 from . import operations as _ops
-from ._core import Clock, Core, SignerFactory, transport_error
+from ._core import PAYMENT_LIMITS, Clock, Core, SignerFactory, check_injected, transport_error
 from .config import Config
-from .errors import ConfigError
+from .errors import ConfigError, TransportError
 from .models import (
     Balance,
     CardPaymentRequest,
@@ -33,14 +33,22 @@ from .results import Result
 class Client:
     """Typed operations over httpx.
 
-    The transport is replaceable. Pass your own ``httpx.Client`` (proxy, logging, event hooks) as
-    ``http_client``, or only a custom transport as ``transport`` (a fake in tests). A client you
-    pass in is yours to close.
+    The transport is replaceable. Pass a custom transport as ``transport`` (a fake in tests), or
+    your own ready clients as ``http_client`` (queries and lookups) together with
+    ``payment_http_client`` (payments and writes). Clients you pass in are yours to close.
 
-    Nothing is retried, ever: not by this class, and the default transport is built with
-    ``retries=0``. If you inject a client or transport that retries on its own, payments and
-    writes can be sent twice; do not. Payments and writes send ``Connection: close`` so that they
-    use a fresh connection.
+    Nothing is retried, ever: not by this class, and the default transports are built with
+    ``retries=0``. If you inject something that retries on its own, payments and writes can be
+    sent twice; do not.
+
+    Payments and writes must use a connection that no earlier request has used. By default this
+    class owns a separate pool for them, built with ``max_keepalive_connections=0`` and without
+    HTTP/2, so every payment or write opens a new connection and closes it after the response. The
+    ``Connection: close`` header is also sent, but it only takes effect after the response, and
+    HTTP/2 drops it, so it is not what provides the guarantee. When you pass ``http_client`` you
+    must also pass a dedicated ``payment_http_client`` built the same way (see
+    ``selcompy.PAYMENT_LIMITS``, with ``http2=False``). Injected clients must not set default
+    ``params`` or ``auth``, because those would change the signed request.
     """
 
     def __init__(
@@ -48,17 +56,39 @@ class Client:
         config: Config,
         *,
         http_client: httpx.Client | None = None,
+        payment_http_client: httpx.Client | None = None,
         transport: httpx.BaseTransport | None = None,
         clock: Clock | None = None,
         signer_factory: SignerFactory | None = None,
     ) -> None:
-        if http_client is not None and transport is not None:
-            raise ConfigError("pass http_client or transport, not both")
+        if transport is not None and (http_client is not None or payment_http_client is not None):
+            raise ConfigError("pass transport, or http_client with payment_http_client, not both")
+        if http_client is not None:
+            if payment_http_client is None or payment_http_client is http_client:
+                raise ConfigError(
+                    "payments and writes need their own client: pass a dedicated "
+                    "payment_http_client (see PAYMENT_LIMITS)"
+                )
+            check_injected(http_client)
+            check_injected(payment_http_client)
+        elif payment_http_client is not None:
+            raise ConfigError("payment_http_client needs http_client")
         self._core = Core(config, clock, signer_factory)
         self._owns_http = http_client is None
-        self._http = http_client or httpx.Client(
-            transport=transport or httpx.HTTPTransport(retries=0), follow_redirects=False
-        )
+        if http_client is not None:
+            self._http = http_client
+            self._pay_http = payment_http_client or http_client
+        elif transport is not None:
+            self._http = httpx.Client(transport=transport, follow_redirects=False)
+            self._pay_http = self._http
+        else:
+            self._http = httpx.Client(
+                transport=httpx.HTTPTransport(retries=0, http2=False), follow_redirects=False
+            )
+            self._pay_http = httpx.Client(
+                transport=httpx.HTTPTransport(retries=0, http2=False, limits=PAYMENT_LIMITS),
+                follow_redirects=False,
+            )
 
     @property
     def config(self) -> Config:
@@ -68,9 +98,11 @@ class Client:
         return f"Client(environment={self._core.config.environment.value!r})"
 
     def close(self) -> None:
-        """Close the HTTP client, if this object created it."""
+        """Close the HTTP clients, if this object created them."""
         if self._owns_http:
             self._http.close()
+            if self._pay_http is not self._http:
+                self._pay_http.close()
 
     def __enter__(self) -> Client:
         return self
@@ -85,8 +117,10 @@ class Client:
 
     def _execute(self, plan: _ops.Plan) -> Result[Any]:
         prepared = self._core.prepare(plan)
+        http = self._pay_http if plan.spec.fresh_connection else self._http
+        failure: TransportError | None = None
         try:
-            response = self._http.request(
+            response = http.request(
                 prepared.method,
                 prepared.url,
                 headers=prepared.headers,
@@ -95,7 +129,11 @@ class Client:
                 follow_redirects=False,
             )
         except Exception as exc:
-            raise transport_error(plan.spec.name, exc) from None
+            # Built here, raised below: raising inside this block would keep the library
+            # exception, and the request it carries, as __context__.
+            failure = transport_error(plan.spec.name, exc)
+        if failure is not None:
+            raise failure
         return self._core.finish(plan, response.status_code, response.content)
 
     def create_order(self, req: CreateOrderRequest) -> Result[OrderCreated]:

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import enum
+import math
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from .errors import ConfigError
-from .masking import mask_key
+from .masking import NoSecretCopy, mask_key
 
 PRODUCTION_URL = "https://apigw.selcommobile.com"
 SANDBOX_URL = "https://apigwtest.selcommobile.com"
@@ -24,7 +25,7 @@ class Environment(enum.Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class Credentials:
+class Credentials(NoSecretCopy):
     """API key, API secret and vendor (till) ID, plus the float PIN for payouts."""
 
     api_key: str
@@ -55,8 +56,14 @@ class Timeouts:
     read: float
 
     def __post_init__(self) -> None:
-        if self.connect <= 0 or self.read <= 0:
-            raise ConfigError("timeouts must be greater than zero; no operation runs without one")
+        for name in ("connect", "read"):
+            value = getattr(self, name)
+            ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+            if not ok or not math.isfinite(value) or value <= 0:
+                raise ConfigError(
+                    f"timeout {name} must be a finite number above zero; "
+                    "no operation runs without a timeout"
+                )
 
 
 QUERY_TIMEOUTS = Timeouts(connect=10.0, read=10.0)
@@ -79,7 +86,7 @@ def _coerce_environment(value: object) -> Environment:
 
 
 @dataclass(frozen=True, slots=True)
-class Config:
+class Config(NoSecretCopy):
     """Everything a client needs. ``environment`` has no default and nothing falls back to one.
 
     ``credentials`` signs payouts and, unless ``checkout_credentials`` is given, checkout too.
