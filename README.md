@@ -151,8 +151,8 @@ queries = httpx.Client(proxy="http://proxy.internal:3128", verify="/etc/ssl/ca.p
 payments = httpx.Client(
     proxy="http://proxy.internal:3128",
     verify="/etc/ssl/ca.pem",
-    limits=PAYMENT_LIMITS,   # keep no connection for reuse
-    http2=False,             # HTTP/2 multiplexes requests on one connection
+    limits=PAYMENT_LIMITS,  # keep no connection for reuse
+    http2=False,  # HTTP/2 multiplexes requests on one connection
 )
 client = Client(config, http_client=queries, payment_http_client=payments)  # you close both
 ```
