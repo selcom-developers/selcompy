@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import enum
 import hmac
+import inspect
 import json
 import re
 import threading
@@ -171,6 +172,16 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
     return None
 
 
+def _verdict(seen: object) -> Verdict:
+    """VALID or REPLAY from a store's answer. Anything but a bool is a store failure: an
+    un-awaited coroutine, for one, would otherwise count as true."""
+    if inspect.iscoroutine(seen):
+        seen.close()  # never awaited; silence the warning
+    if not isinstance(seen, bool):
+        raise ReplayStoreError("the replay store must return a bool")
+    return Verdict.REPLAY if seen else Verdict.VALID
+
+
 class WebhookVerifier:
     """Verifies deliveries against the API secret.
 
@@ -197,7 +208,17 @@ class WebhookVerifier:
             InMemoryReplayStore() if replay_store is None else replay_store
         )
         self.async_replay_store = async_replay_store
+        if inspect.iscoroutinefunction(self.replay_store.check_and_record):
+            raise ConfigError(
+                "replay_store.check_and_record is async: pass it as async_replay_store "
+                "and use averify"
+            )
+        if async_replay_store is not None and not inspect.iscoroutinefunction(
+            async_replay_store.check_and_record
+        ):
+            raise ConfigError("async_replay_store.check_and_record must be an async function")
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._now()  # a clock without a time zone is a setup mistake: fail here, not per delivery
 
     def __repr__(self) -> str:
         return f"WebhookVerifier(window_seconds={int(self._window.total_seconds())})"
@@ -227,7 +248,7 @@ class WebhookVerifier:
             raise
         except Exception:
             raise ReplayStoreError("the replay store failed") from None
-        return Verdict.REPLAY if seen else Verdict.VALID
+        return _verdict(seen)
 
     async def averify(self, headers: Mapping[str, str], raw_body: bytes | str) -> Verdict:
         """Like :meth:`verify`, for async handlers. Uses ``async_replay_store`` when one was
@@ -247,7 +268,7 @@ class WebhookVerifier:
             raise
         except Exception:
             raise ReplayStoreError("the replay store failed") from None
-        return Verdict.REPLAY if seen else Verdict.VALID
+        return _verdict(seen)
 
     def _safe_check(
         self, headers: Mapping[str, str], raw_body: bytes | str, now: datetime

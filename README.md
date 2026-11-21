@@ -157,7 +157,7 @@ payments = httpx.Client(
 client = Client(config, http_client=queries, payment_http_client=payments)  # you close both
 ```
 
-When you pass `http_client` you must also pass a separate `payment_http_client`, built as above, so that a payment or write never travels on a connection an earlier request used. The same client twice is refused. Injected clients must not set default `params` or `auth`, because those would change the signed request; that is refused too.
+When you pass `http_client` you must also pass a separate `payment_http_client`, built as above, so that a payment or write never travels on a connection an earlier request used. The same client twice is refused, and so is a payment client that keeps connections or has HTTP/2 enabled. `transport=` takes fakes and custom transports only; httpx's own `HTTPTransport` is refused there, because it pools connections. Injected clients must not set default `params` or `auth`, because those would change the signed request; that is refused too.
 
 The default transports are built with `retries=0` and redirects are never followed. If you inject something that retries on its own, do not use it for payments or writes.
 
@@ -191,7 +191,7 @@ Handler order: verify, store, acknowledge, then confirm with `order_status` in t
 
 `verify` follows the specification step by step. It never raises on bad input: every malformed delivery is `INVALID`, and numbers in signed fields are checked from their text without being expanded. The one exception is `ReplayStoreError`, raised when the replay store itself fails. `UNSIGNED` deliveries have nothing to check, so the order-status confirmation is the only protection.
 
-In an async handler use `await verifier.averify(headers, raw_body)`. It accepts an `async_replay_store` (the `AsyncReplayStore` protocol, for a shared store) and falls back to the synchronous store otherwise. The verifier's clock must return a timezone-aware `datetime`; a naive one raises `ConfigError`. Bodies over 1 MiB (counted in UTF-8 bytes) are `INVALID`.
+In an async handler use `await verifier.averify(headers, raw_body)`. It accepts an `async_replay_store` (the `AsyncReplayStore` protocol, for a shared store; an async store passed as `replay_store` is refused) and falls back to the synchronous store otherwise. The verifier's clock must return a timezone-aware `datetime`; a naive one raises `ConfigError`. Bodies over 1 MiB (counted in UTF-8 bytes) are `INVALID`.
 
 A replay entry lives until the later of the current time and the signed timestamp, plus the window. `InMemoryReplayStore` is for one process; implement the `ReplayStore` protocol (one atomic method) on a shared store when you run several.
 

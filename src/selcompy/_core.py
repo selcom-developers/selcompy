@@ -46,6 +46,38 @@ def check_injected(client: httpx.Client | httpx.AsyncClient) -> None:
         )
 
 
+def check_payment_client(client: httpx.Client | httpx.AsyncClient) -> None:
+    """Refuse a payment client that could carry a payment on a connection already used.
+
+    This reads the pool settings of httpx's own transports (a private detail of httpx and
+    httpcore); transports without such a pool, such as test fakes, are not inspected.
+    """
+    transports = [client._transport, *client._mounts.values()]
+    for transport in transports:
+        pool = getattr(transport, "_pool", None)
+        if pool is None:
+            continue
+        if getattr(pool, "_http2", False):
+            raise ConfigError(
+                "payment_http_client must not enable HTTP/2: it multiplexes requests on one "
+                "connection (build it with http2=False)"
+            )
+        if getattr(pool, "_max_keepalive_connections", 0):
+            raise ConfigError(
+                "payment_http_client must not keep connections for reuse "
+                "(build it with limits=PAYMENT_LIMITS)"
+            )
+
+
+def check_transport(transport: object) -> None:
+    """A real httpx transport pools connections, so it cannot carry payments by itself."""
+    if isinstance(transport, (httpx.HTTPTransport, httpx.AsyncHTTPTransport)):
+        raise ConfigError(
+            "transport= takes fakes and custom transports, not httpx's own HTTP transports: "
+            "pass http_client with a dedicated payment_http_client instead"
+        )
+
+
 def default_clock() -> datetime:
     """The current instant in Africa/Dar_es_Salaam (+03:00, no daylight saving)."""
     return datetime.now(DAR_ES_SALAAM)

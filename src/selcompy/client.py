@@ -9,7 +9,16 @@ from typing import Any
 import httpx
 
 from . import operations as _ops
-from ._core import PAYMENT_LIMITS, Clock, Core, SignerFactory, check_injected, transport_error
+from ._core import (
+    PAYMENT_LIMITS,
+    Clock,
+    Core,
+    SignerFactory,
+    check_injected,
+    check_payment_client,
+    check_transport,
+    transport_error,
+)
 from .config import Config
 from .errors import ConfigError, TransportError
 from .models import (
@@ -71,8 +80,11 @@ class Client:
                 )
             check_injected(http_client)
             check_injected(payment_http_client)
+            check_payment_client(payment_http_client)
         elif payment_http_client is not None:
             raise ConfigError("payment_http_client needs http_client")
+        if transport is not None:
+            check_transport(transport)
         self._core = Core(config, clock, signer_factory)
         self._owns_http = http_client is None
         if http_client is not None:

@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from selcompy import (
+    PAYMENT_LIMITS,
     AsyncClient,
     Client,
     Config,
@@ -362,17 +363,145 @@ def test_str_body_cap_counts_utf8_bytes() -> None:
     assert parse_webhook('{"order_id":"O","pad":"' + "é" * 1000 + '"}') is not None
 
 
-def test_naive_clock_is_a_configuration_error() -> None:
-    naive = WebhookVerifier(SECRET, clock=lambda: datetime(2026, 11, 21, 10, 31))
+def test_naive_clock_is_a_configuration_error_at_construction() -> None:
+    with pytest.raises(ConfigError, match="timezone"):
+        WebhookVerifier(SECRET, clock=lambda: datetime(2026, 11, 21, 10, 31))
+    flip = [NOW]
+    verifier = WebhookVerifier(SECRET, clock=lambda: flip[0])
+    flip[0] = datetime(2026, 11, 21, 10, 31)  # a clock that turns naive later still raises
     headers, body = delivery()
     with pytest.raises(ConfigError, match="timezone"):
-        naive.verify(headers, body)
+        verifier.verify(headers, body)
     with pytest.raises(ConfigError, match="timezone"):
-        asyncio.run(naive.averify(headers, body))
+        asyncio.run(verifier.averify(headers, body))
     aware = WebhookVerifier(
         SECRET, clock=lambda: datetime(2026, 11, 21, 7, 31, tzinfo=timezone.utc)
     )
     assert aware.verify(headers, body) is Verdict.VALID
+
+
+def test_async_store_as_replay_store_is_refused_at_construction() -> None:
+    with pytest.raises(ConfigError, match="async_replay_store"):
+        WebhookVerifier(SECRET, replay_store=AsyncStore())  # type: ignore[arg-type]
+    with pytest.raises(ConfigError, match="async function"):
+        WebhookVerifier(SECRET, async_replay_store=InMemoryReplayStore())  # type: ignore[arg-type]
+
+
+class _Answers:
+    def __init__(self, answer: object) -> None:
+        self.answer = answer
+
+    def check_and_record(self, key: str, expires_at: datetime, now: datetime) -> bool:
+        return self.answer  # type: ignore[return-value]
+
+
+class _LateCoroutine:
+    """Not an async function, but it hands back a coroutine: also not a bool."""
+
+    async def _inner(self) -> bool:
+        return False
+
+    def check_and_record(self, key: str, expires_at: datetime, now: datetime) -> bool:
+        return self._inner()  # type: ignore[return-value]
+
+
+@pytest.mark.parametrize("answer", [1, 0, "yes", None, [], object()])
+def test_a_store_must_answer_with_a_bool(answer: object) -> None:
+    v = WebhookVerifier(SECRET, clock=lambda: NOW, replay_store=_Answers(answer))
+    with pytest.raises(ReplayStoreError):
+        v.verify(*delivery())
+    with pytest.raises(ReplayStoreError):
+        asyncio.run(v.averify(*delivery()))
+
+
+def test_a_store_returning_a_coroutine_is_a_store_error_not_a_replay() -> None:
+    v = WebhookVerifier(SECRET, clock=lambda: NOW, replay_store=_LateCoroutine())
+    with pytest.raises(ReplayStoreError):
+        v.verify(*delivery())
+
+
+async def test_async_store_must_answer_with_a_bool_too() -> None:
+    class Wrong:
+        async def check_and_record(self, key: str, expires_at: datetime, now: datetime) -> bool:
+            return "no"  # type: ignore[return-value]
+
+    v = WebhookVerifier(SECRET, clock=lambda: NOW, async_replay_store=Wrong())
+    with pytest.raises(ReplayStoreError):
+        await v.averify(*delivery())
+
+
+# 2b. The transport= path and payment clients with pooling or HTTP/2 -------------------------
+
+
+def test_real_httpx_transports_are_refused_in_transport() -> None:
+    with pytest.raises(ConfigError, match="payment_http_client"):
+        Client(CONFIG, transport=httpx.HTTPTransport())
+    with pytest.raises(ConfigError, match="payment_http_client"):
+        AsyncClient(CONFIG, transport=httpx.AsyncHTTPTransport())
+    Client(CONFIG, transport=httpx.MockTransport(lambda r: httpx.Response(200))).close()
+
+
+def test_payment_client_that_keeps_connections_is_refused() -> None:
+    pooled = httpx.Client()
+    with pytest.raises(ConfigError, match="PAYMENT_LIMITS"):
+        Client(CONFIG, http_client=httpx.Client(), payment_http_client=pooled)
+    proxied = httpx.Client(proxy="http://proxy.example.com:3128")
+    with pytest.raises(ConfigError, match="PAYMENT_LIMITS"):
+        Client(CONFIG, http_client=httpx.Client(), payment_http_client=proxied)
+
+
+def test_payment_client_with_http2_is_refused() -> None:
+    client = httpx.Client(limits=PAYMENT_LIMITS)
+    client._transport._pool._http2 = True  # type: ignore[attr-defined]  # as http2=True sets it
+    with pytest.raises(ConfigError, match="HTTP/2"):
+        Client(CONFIG, http_client=httpx.Client(), payment_http_client=client)
+
+
+async def test_async_payment_client_checks() -> None:
+    with pytest.raises(ConfigError, match="PAYMENT_LIMITS"):
+        AsyncClient(
+            CONFIG, http_client=httpx.AsyncClient(), payment_http_client=httpx.AsyncClient()
+        )
+    client = httpx.AsyncClient(limits=PAYMENT_LIMITS)
+    client._transport._pool._http2 = True  # type: ignore[attr-defined]
+    with pytest.raises(ConfigError, match="HTTP/2"):
+        AsyncClient(CONFIG, http_client=httpx.AsyncClient(), payment_http_client=client)
+
+
+def test_properly_built_injected_clients_keep_payments_on_fresh_connections(
+    server: _Server,
+) -> None:
+    queries = httpx.Client()
+    payments = httpx.Client(limits=PAYMENT_LIMITS, http2=False)
+    with Client(server.config, http_client=queries, payment_http_client=payments) as client:
+        client.order_status("ORD-1")
+        client.utility_payment(UTILITY)
+        client.order_status("ORD-1")
+        client.utility_payment(replace(UTILITY, transid="TXN-UTL-0002"))
+        client.cancel_order("ORD-1")
+        client.order_status("ORD-1")
+    queries.close()
+    payments.close()
+    _check_ports(server.ports)
+
+
+async def test_properly_built_async_injected_clients_use_fresh_connections(
+    server: _Server,
+) -> None:
+    queries = httpx.AsyncClient()
+    payments = httpx.AsyncClient(limits=PAYMENT_LIMITS, http2=False)
+    async with AsyncClient(
+        server.config, http_client=queries, payment_http_client=payments
+    ) as client:
+        await client.order_status("ORD-1")
+        await client.utility_payment(UTILITY)
+        await client.order_status("ORD-1")
+        await client.utility_payment(replace(UTILITY, transid="TXN-UTL-0002"))
+        await client.cancel_order("ORD-1")
+        await client.order_status("ORD-1")
+    await queries.aclose()
+    await payments.aclose()
+    _check_ports(server.ports)
 
 
 # 7. Config and packaging -------------------------------------------------------------------
